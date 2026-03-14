@@ -22,7 +22,20 @@ export default function NilaiTab() {
   }, [students, kelas, sortMode]);
 
   const handleNilaiChange = (nisn: string, val: string) => {
-    setNilaiData(prev => ({ ...prev, [nisn]: val }));
+    if (val === '') {
+      setNilaiData(prev => ({ ...prev, [nisn]: val }));
+      return;
+    }
+    const num = parseInt(val, 10);
+    if (!isNaN(num)) {
+      if (num > 100) {
+        setNilaiData(prev => ({ ...prev, [nisn]: '100' }));
+      } else if (num < 0) {
+        setNilaiData(prev => ({ ...prev, [nisn]: '0' }));
+      } else {
+        setNilaiData(prev => ({ ...prev, [nisn]: num.toString() }));
+      }
+    }
   };
 
   const saveNilai = async () => {
