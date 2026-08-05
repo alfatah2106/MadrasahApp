@@ -2,125 +2,190 @@ import React, { useState } from 'react';
 
 export default function SlipTab({ rawData }: { rawData: any }) {
   const [email, setEmail] = useState('');
+  const [namaGuru, setNamaGuru] = useState(''); // State baru untuk nama guru
   const [startDate, setStartDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
   const [endDate, setEndDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
   const [result, setResult] = useState<any[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
 
+  const tenantName = rawData?.tenant_name || rawData?.tenantName || "NAMA SEKOLAH / TENANT";
+
+  const getMonday = (d: Date) => {
+    const date = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    const day = date.getDay();
+    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(date.setDate(diff));
+  };
+
+  const formatDate = (dateString: string | Date) => {
+    return new Date(dateString).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  // Format tanggal khusus untuk nama file PDF (contoh: 01-08)
+  const formatShortDateFile = (dateString: string | Date) => {
+    const d = new Date(dateString);
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    return `${day}-${month}`; 
+  };
+
   const generateSlipGuru = () => {
     const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    
     const end = new Date(endDate);
-    end.setHours(23, 59, 59);
-    if (!email) return alert("Pilih Guru!");
+    end.setHours(23, 59, 59, 999);
+    
+    if (!email) return alert("Pilih Email Guru terlebih dahulu!");
 
-    const filtered = rawData.absensi.filter((r: any) =>
-      r.email_guru === email && new Date(r.tanggal) >= start && new Date(r.tanggal) <= end
-    );
+    const filtered = rawData.absensi.filter((r: any) => {
+      const rowDate = new Date(r.tanggal);
+      return r.email_guru === email && rowDate >= start && rowDate <= end;
+    });
 
-    if (filtered.length === 0) return alert("Tidak ada data mengajar.");
+    if (filtered.length === 0) {
+        setResult([]);
+        setHasSearched(true);
+        return alert("Tidak ada data mengajar pada periode tersebut.");
+    }
 
-    const uniqueSessions: any[] = [];
-    const seen = new Set();
-    const dailyHours: Record<string, number> = {};
+    const weeksMap = new Map();
 
     filtered.forEach((row: any) => {
-      const key = `${row.tanggal}_${row.jam}_${row.kelas}_${row.mapel}`;
-      if (!seen.has(key)) {
-        seen.add(key);
+      const dateObj = new Date(row.tanggal);
+      const dayOfWeek = dateObj.getDay(); 
+
+      if (dayOfWeek === 0) return; 
+
+      const monday = getMonday(dateObj);
+      const weekKey = monday.getTime();
+
+      if (!weeksMap.has(weekKey)) {
+        const saturday = new Date(monday);
+        saturday.setDate(monday.getDate() + 5);
+
+        weeksMap.set(weekKey, {
+          label: `${formatDate(monday)} s/d ${formatDate(saturday)}`,
+          monday: monday,
+          matrix: {}, 
+          dailyTotals: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
+          weeklyTotal: 0,
+          maxJam: 8 
+        });
+      }
+
+      const weekData = weeksMap.get(weekKey);
+      
+      if (!weekData.matrix[dayOfWeek]) {
+        weekData.matrix[dayOfWeek] = {};
+      }
+
+      if (row.jam) {
+        const jamArray = row.jam.toString().split(',')
+          .map((j: string) => parseInt(j.trim(), 10))
+          .filter((j: number) => !isNaN(j));
         
-        let durasi = 0;
-        if (row.jam) {
-            const jamArray = row.jam.toString().split(',').filter((j: string) => j.trim() !== "");
-            durasi = jamArray.length;
-        }
+        jamArray.forEach((jam: number) => {
+          if (jam > weekData.maxJam) weekData.maxJam = jam;
 
-        const tgl = row.tanggal;
-        dailyHours[tgl] = (dailyHours[tgl] || 0) + durasi;
-
-        let pukul = "-";
-        let hoursInt = -1;
-        if (row.created_at) {
-            // Extract time directly from string to avoid timezone conversion issues
-            // Handles cases where the backend returns local time appended with 'Z'
-            const timeMatch = String(row.created_at).match(/(\d{2}):(\d{2})/);
-            if (timeMatch) {
-                hoursInt = parseInt(timeMatch[1], 10);
-                pukul = `${timeMatch[1]}:${timeMatch[2]}`;
-            } else {
-                const dateObj = new Date(row.created_at);
-                if (!isNaN(dateObj.getTime())) {
-                    hoursInt = dateObj.getHours();
-                    const hours = hoursInt.toString().padStart(2, '0');
-                    const minutes = dateObj.getMinutes().toString().padStart(2, '0');
-                    pukul = `${hours}:${minutes}`;
-                }
-            }
-        }
-
-        const isOutsideTime = hoursInt !== -1 && (hoursInt < 7 || hoursInt >= 14);
-
-        uniqueSessions.push({
-            tanggal: row.tanggal,
-            mapel: row.mapel,
-            kelas: row.kelas,
-            materi: row.materi,
-            jumlah_jam: durasi,
-            pukul: pukul,
-            isOutsideTime: isOutsideTime
+          if (!weekData.matrix[dayOfWeek][jam]) {
+            weekData.matrix[dayOfWeek][jam] = {
+              mapel: row.mapel,
+              kelas: row.kelas,
+              materi: row.materi
+            };
+            weekData.dailyTotals[dayOfWeek]++;
+            weekData.weeklyTotal++;
+          }
         });
       }
     });
 
-    uniqueSessions.forEach(sess => {
-        sess.totalJamHariIni = dailyHours[sess.tanggal] || 0;
-        sess.isOverLimit = sess.totalJamHariIni > 8;
-    });
-
-    uniqueSessions.sort((a, b) => new Date(a.tanggal).getTime() - new Date(b.tanggal).getTime());
-    setResult(uniqueSessions);
+    const sortedWeeks = Array.from(weeksMap.values()).sort((a, b) => a.monday.getTime() - b.monday.getTime());
+    setResult(sortedWeeks);
     setHasSearched(true);
   };
 
-  const totalJam = result.reduce((acc, curr) => acc + curr.jumlah_jam, 0);
+  // Fungsi untuk handle klik tombol Cetak agar nama file otomatis berubah
+  const handlePrint = () => {
+    const originalTitle = document.title; // Simpan judul web asli
+    
+    // Siapkan nama file
+    const safeName = namaGuru.trim() || email.split('@')[0] || "Guru";
+    const tglMulai = formatShortDateFile(startDate);
+    const tglAkhir = formatShortDateFile(endDate);
+    
+    // Ubah title web sementara (Browser akan pakai ini untuk nama file PDF)
+    document.title = `Rekap ${safeName} ${tglMulai} sd ${tglAkhir}`;
+    
+    window.print();
+    
+    // Kembalikan ke judul web aslinya
+    document.title = originalTitle;
+  };
 
-  const allEmails = [...new Set([...rawData.absensi.map((a: any) => a.email_guru).filter(Boolean), ...(rawData.emails_only || [])])].sort();
+  const allEmails = [...new Set([
+      ...(rawData.absensi || []).map((a: any) => a.email_guru).filter(Boolean), 
+      ...(rawData.emails_only || [])
+  ])].sort();
+
+  const daysLabel = [
+      { id: 1, name: "SENIN" },
+      { id: 2, name: "SELASA" },
+      { id: 3, name: "RABU" },
+      { id: 4, name: "KAMIS" },
+      { id: 5, name: "JUMAT" },
+      { id: 6, name: "SABTU" }
+  ];
 
   return (
     <div className="fade-in">
+      {/* --- FORM FILTER (Disembunyikan saat di-print) --- */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm mb-6 print:hidden">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-          <div className="md:col-span-2">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+          <div className="md:col-span-3">
             <label className="block text-xs font-medium text-slate-500 mb-1">Pilih Email Guru</label>
             <select
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="block w-full px-3 py-2 text-sm border-slate-300 rounded-lg border bg-slate-50 focus:ring-indigo-500"
+              className="block w-full px-3 py-2 text-sm border-slate-300 rounded-lg border bg-slate-50 focus:ring-indigo-500 outline-none"
             >
-              <option value="">-- Pilih Guru --</option>
+              <option value="">-- Pilih Email --</option>
               {allEmails.map((e: any) => <option key={e} value={e}>{e}</option>)}
             </select>
           </div>
-          <div>
+          <div className="md:col-span-4">
+            <label className="block text-xs font-medium text-slate-500 mb-1">Nama Guru (Ditampilkan di Cetakan)</label>
+            <input
+              type="text"
+              value={namaGuru}
+              onChange={(e) => setNamaGuru(e.target.value)}
+              placeholder="Masukkan Nama Lengkap"
+              className="block w-full px-3 py-2 text-sm border-slate-300 rounded-lg border bg-slate-50 focus:ring-indigo-500 outline-none"
+            />
+          </div>
+          <div className="md:col-span-3">
             <label className="block text-xs font-medium text-slate-500 mb-1">Periode</label>
             <div className="flex gap-2">
               <input
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="block w-full px-2 py-2 text-xs border-slate-300 rounded-lg border bg-slate-50"
+                className="block w-full px-2 py-2 text-xs border-slate-300 rounded-lg border bg-slate-50 outline-none"
               />
               <input
                 type="date"
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
-                className="block w-full px-2 py-2 text-xs border-slate-300 rounded-lg border bg-slate-50"
+                className="block w-full px-2 py-2 text-xs border-slate-300 rounded-lg border bg-slate-50 outline-none"
               />
             </div>
           </div>
-          <div>
+          <div className="md:col-span-2">
             <button
               onClick={generateSlipGuru}
-              className="w-full px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center justify-center gap-2"
+              className="w-full px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center justify-center gap-2 transition-colors"
             >
               <i className="fa-solid fa-file-invoice"></i> Buat Slip
             </button>
@@ -131,96 +196,132 @@ export default function SlipTab({ rawData }: { rawData: any }) {
       {!hasSearched && (
         <div className="py-20 text-center print:hidden">
           <h3 className="text-lg font-medium text-slate-900">Belum ada slip</h3>
-          <p className="text-slate-500">Pilih email guru dan periode.</p>
+          <p className="text-slate-500">Pilih email, isi nama guru, dan tentukan periode untuk melihat rekapitulasi matriks.</p>
         </div>
       )}
 
-      {hasSearched && (
+      {hasSearched && result.length > 0 && (
         <div>
+          {/* Tombol Cetak yang memanggil handlePrint */}
           <div className="flex justify-end mb-4 print:hidden">
             <button
-              onClick={() => window.print()}
-              className="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-900 shadow-sm flex items-center gap-2"
+              onClick={handlePrint}
+              className="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-900 shadow-sm flex items-center gap-2 transition-colors"
             >
               <i className="fa-solid fa-print"></i> Cetak PDF
             </button>
           </div>
-          <div className="bg-white p-8 border border-slate-200 shadow-lg max-w-4xl mx-auto slip-paper">
-            <div className="text-center border-b-2 border-slate-800 pb-4 mb-6">
-              <h1 className="text-2xl font-bold uppercase tracking-wider text-slate-900">SISTEM ISKA</h1>
-              <p className="text-sm text-slate-600">Laporan Rekapitulasi Jam Mengajar Guru</p>
+
+          {/* --- KERTAS SLIP --- */}
+          <div className="bg-white p-8 border border-slate-200 shadow-lg max-w-[1000px] mx-auto slip-paper text-slate-800">
+            {/* Header Kop */}
+            <div className="text-center border-b-[3px] border-slate-800 pb-4 mb-6">
+              <h1 className="text-2xl font-black uppercase tracking-wider text-slate-900">REKAP GURU MADRASAH</h1>
+              <p className="text-sm text-slate-600 uppercase font-semibold mt-1">{tenantName}</p>
             </div>
-            <div className="flex justify-between mb-6 text-sm">
+
+            {/* Info Guru */}
+            <div className="flex justify-between mb-8 text-sm bg-slate-50 p-4 rounded-lg border border-slate-200">
               <div>
-                <p className="text-slate-500">Guru:</p>
-                <p className="font-bold text-slate-800 text-lg">{email}</p>
+                <p className="text-slate-500 mb-1 text-xs uppercase font-bold">Nama Guru</p>
+                <p className="font-bold text-slate-900 text-lg uppercase">{namaGuru || email}</p>
+                {namaGuru && <p className="text-slate-500 text-xs mt-0.5">{email}</p>}
               </div>
               <div className="text-right">
-                <p className="text-slate-500">Periode:</p>
-                <p className="font-semibold text-slate-800">{startDate} - {endDate}</p>
+                <p className="text-slate-500 mb-1 text-xs uppercase font-bold">Periode Laporan</p>
+                <p className="font-semibold text-slate-800">{formatDate(startDate)} - {formatDate(endDate)}</p>
               </div>
             </div>
-            <table className="w-full text-left text-sm border border-slate-300 mb-6 font-sans">
-              <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-300">
-                <tr>
-                  <th className="px-4 py-2 border-r border-slate-300 w-12 text-center">No</th>
-                  <th className="px-4 py-2 border-r border-slate-300 w-32">Tanggal</th>
-                  <th className="px-4 py-2 border-r border-slate-300 w-20 text-center">Pukul</th>
-                  <th className="px-4 py-2 border-r border-slate-300">Mapel / Kelas</th>
-                  <th className="px-4 py-2 border-r border-slate-300">Materi</th>
-                  <th className="px-4 py-2 text-center w-24">Jml Jam</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200">
-                {result.map((sess, idx) => {
-                  const dateFmt = new Date(sess.tanggal).toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' });
-                  let rowClass = "border-b hover:bg-slate-50 transition-colors";
-                  
-                  if (sess.isOverLimit) {
-                      rowClass = "border-b bg-rose-50 hover:bg-rose-100/80";
-                  } else if (sess.isOutsideTime) {
-                      rowClass = "border-b bg-amber-50 hover:bg-amber-100/80";
-                  }
 
-                  return (
-                    <tr key={idx} className={rowClass}>
-                      <td className="px-4 py-3 border-r border-slate-300 text-center text-slate-500 text-xs">{idx + 1}</td>
-                      <td className="px-4 py-3 border-r border-slate-300 text-slate-700 text-sm whitespace-nowrap">{dateFmt}</td>
-                      <td className={`px-4 py-3 border-r border-slate-300 text-center font-medium ${sess.isOutsideTime ? 'text-amber-700' : 'text-slate-600'} text-sm`}>{sess.pukul}</td>
-                      <td className="px-4 py-3 border-r border-slate-300">
-                          <div className="font-bold text-slate-800 text-sm">{sess.mapel}</div>
-                          <div className="text-[11px] text-indigo-600 font-semibold italic">Kelas: {sess.kelas}</div>
-                      </td>
-                      <td className="px-4 py-3 border-r border-slate-300">
-                          <div className="text-slate-600 text-xs leading-relaxed max-w-[200px] line-clamp-2">{sess.materi || '-'}</div>
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                          <div className="font-black text-slate-900 text-base">{sess.jumlah_jam}</div>
-                          {sess.isOverLimit ? (
-                              <div className="text-[10px] text-rose-600 font-bold mt-1 flex items-center justify-center gap-1">
-                                  <i className="fa-solid fa-triangle-exclamation"></i> Total: {sess.totalJamHariIni} Jam (Limit 8)
-                              </div>
-                          ) : sess.isOutsideTime ? (
-                              <div className="text-[10px] text-amber-600 font-bold mt-1 flex items-center justify-center gap-1">
-                                  <i className="fa-solid fa-clock"></i> Diluar Jam Kerja
-                              </div>
-                          ) : null}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot className="bg-slate-50 font-bold text-slate-800 border-t-2 border-slate-300">
-                <tr>
-                  <td colSpan={5} className="px-4 py-3 text-right border-r border-slate-300">Total Jam</td>
-                  <td className="px-4 py-3 text-center text-lg">{totalJam}</td>
-                </tr>
-              </tfoot>
-            </table>
+            {/* Looping Tabel per Pekan */}
+            {result.map((week, wIdx) => {
+              const rowHours = Array.from({ length: week.maxJam }, (_, i) => i + 1);
+
+              return (
+                <div key={wIdx} className="mb-12 break-inside-avoid">
+                  <div className="mb-2 flex items-center justify-between">
+                     <h3 className="font-bold text-base bg-indigo-100 text-indigo-900 px-3 py-1 rounded-md">
+                        PEKAN {wIdx + 1}
+                     </h3>
+                     <span className="text-sm font-semibold text-slate-600">{week.label}</span>
+                  </div>
+
+                  <table className="w-full text-sm border-collapse border-2 border-slate-800 font-sans">
+                    <thead className="bg-slate-200 border-b-2 border-slate-800">
+                      <tr>
+                        <th className="border border-slate-400 p-2 w-16 text-center text-xs">JAM<br/>KE</th>
+                        {daysLabel.map(day => (
+                          <th key={day.id} className="border border-slate-400 p-2 w-32 text-center text-xs tracking-wider">
+                            {day.name}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    
+                    <tbody className="bg-white">
+                      {rowHours.map(jam => (
+                        <tr key={jam} className="hover:bg-slate-50 transition-colors">
+                          <td className="border border-slate-300 p-2 text-center font-bold bg-slate-50 text-slate-700">
+                             {jam}
+                          </td>
+                          
+                          {daysLabel.map(day => {
+                            const cellData = week.matrix[day.id]?.[jam];
+                            return (
+                              <td key={day.id} className="border border-slate-300 p-1.5 align-top h-14">
+                                {cellData ? (
+                                  <div className="flex flex-col items-center justify-center text-center h-full">
+                                    <span className="font-bold text-xs text-slate-900 leading-tight">{cellData.mapel}</span>
+                                    <span className="text-[10px] text-indigo-600 font-bold mt-0.5">{cellData.kelas}</span>
+                                  </div>
+                                ) : (
+                                  <div className="h-full w-full flex items-center justify-center text-slate-200">
+                                      -
+                                  </div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+
+                    <tfoot className="border-t-2 border-slate-800">
+                      <tr className="bg-slate-100 font-bold">
+                        <td className="border border-slate-400 p-2 text-center text-xs text-slate-700 tracking-wider font-bold">
+                           JUMLAH JP
+                        </td>
+                        {daysLabel.map(day => (
+                          <td key={day.id} className="border border-slate-400 p-2 text-center text-base text-slate-900">
+                            {week.dailyTotals[day.id] > 0 ? week.dailyTotals[day.id] : ''}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr>
+                        <td colSpan={6} className="text-right p-3 font-black text-sm uppercase tracking-wide border-r-0 bg-white">
+                          Total JP Pekan {wIdx + 1}
+                        </td>
+                        <td className="border-l-2 border-slate-800 p-2 text-center font-black text-xl bg-indigo-50 text-indigo-700">
+                          {week.weeklyTotal}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              );
+            })}
+            
+            {result.length > 1 && (
+               <div className="mt-8 p-4 border-2 border-slate-800 bg-slate-50 flex justify-between items-center break-inside-avoid rounded-lg">
+                  <div className="font-bold text-lg uppercase text-slate-700">Grand Total Semua Pekan</div>
+                  <div className="font-black text-3xl text-indigo-800">
+                     {result.reduce((acc, week) => acc + week.weeklyTotal, 0)} <span className="text-lg">JP</span>
+                  </div>
+               </div>
+            )}
           </div>
         </div>
       )}
     </div>
   );
 }
-
