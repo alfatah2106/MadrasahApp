@@ -1,213 +1,305 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAppContext, API_URL } from '../../context/AppContext';
 
-export default function GuruTab({ rawData, setRawData }: { rawData: any, setRawData: any }) {
+export default function GuruTab({ rawData }: { rawData: any }) {
   const { tenant } = useAppContext();
-  const [startDate, setStartDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
-  const [endDate, setEndDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
-  const [loading, setLoading] = useState(false);
-  const [stats, setStats] = useState({ aktif: 0, total: 0, kosong: 0 });
-  const [result, setResult] = useState<any[]>([]);
-  const [periodLabel, setPeriodLabel] = useState('');
+  
+  // State untuk kontrol input
+  const [selectedDate, setSelectedDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
+  const [pesan, setPesan] = useState('');
+  const [pengirim, setPengirim] = useState('');
+  
+  // State untuk data API
+  const [catatanList, setCatatanList] = useState<any[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingCatatan, setIsLoadingCatatan] = useState(false);
 
-  const filterGuru = async () => {
-    if (!startDate || !endDate) return;
-    setLoading(true);
+  // 1. Ekstrak daftar kelas yang unik dari data absensi untuk Header Tabel
+  const classes = useMemo(() => {
+    const clsSet = new Set<string>();
+    if (rawData && rawData.absensi) {
+      rawData.absensi.forEach((r: any) => {
+        if (r.kelas) clsSet.add(r.kelas);
+      });
+    }
+    return Array.from(clsSet).sort();
+  }, [rawData]);
 
-    try {
-      let absensi = rawData.absensi;
-      if (absensi.length === 0) {
-        const res = await fetch(`${API_URL}/api`, {
-          method: "POST",
-          body: JSON.stringify({ action: "admin_load_table", table: "absensi", tenant_id: tenant?.id }),
-        });
-        absensi = await res.json();
-        setRawData((prev: any) => ({ ...prev, absensi }));
+  // 2. Olah Matriks berdasarkan tanggal yang dipilih
+  const matrixData = useMemo(() => {
+    const targetDate = new Date(selectedDate);
+    targetDate.setHours(0, 0, 0, 0);
+    
+    // Filter absensi khusus di tanggal yang dipilih
+    const filtered = (rawData?.absensi || []).filter((r: any) => {
+      const d = new Date(r.tanggal);
+      d.setHours(0, 0, 0, 0);
+      return d.getTime() === targetDate.getTime();
+    });
+
+    const matrix: Record<number, Record<string, string>> = {};
+    let max = 8; // Minimal render 8 jam
+
+    filtered.forEach((r: any) => {
+      if (r.jam && r.kelas) {
+         // Pecah jam ("1,2" jadi [1, 2])
+         const jamArray = r.jam.toString().split(',')
+            .map((j: string) => parseInt(j.trim(), 10))
+            .filter((j: number) => !isNaN(j));
+            
+         jamArray.forEach((jam: number) => {
+            if (jam > max) max = jam;
+            if (!matrix[jam]) matrix[jam] = {};
+            // Jika ada beberapa mapel di jam & kelas yg sama, gabungkan dengan koma
+            if (matrix[jam][r.kelas]) {
+                if (!matrix[jam][r.kelas].includes(r.mapel)) {
+                    matrix[jam][r.kelas] += `, ${r.mapel}`;
+                }
+            } else {
+                matrix[jam][r.kelas] = r.mapel;
+            }
+         });
       }
+    });
 
-      const start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      setPeriodLabel(`${startDate} s.d ${endDate}`);
+    return { matrix, maxJam: max };
+  }, [rawData, selectedDate]);
 
-      const statsMap: any = {};
-      absensi.filter((r: any) => {
-        const d = new Date(r.tanggal);
-        return d >= start && d <= end;
-      }).forEach((r: any) => {
-        const key = `${r.tanggal}_${r.kelas}`;
-        if (!statsMap[r.mapel]) statsMap[r.mapel] = new Set();
-        statsMap[r.mapel].add(key);
-      });
-
-      const resList = rawData.mapel.map((m: any) => {
-        const sessions = statsMap[m.nama_mapel] ? statsMap[m.nama_mapel].size : 0;
-        const diffWeeks = (Math.ceil(Math.abs(end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) || 1) / 7;
-        return {
-          mapel: m.nama_mapel,
-          total: sessions,
-          avg: diffWeeks >= 1 ? (sessions / diffWeeks).toFixed(2) : sessions.toFixed(2),
-        };
-      }).sort((a: any, b: any) => b.total - a.total);
-
-      setResult(resList);
-      let sA = 0, sT = 0, sK = 0;
-      resList.forEach((r: any) => {
-        if (r.total > 0) sA++; else sK++;
-        sT += r.total;
-      });
-      setStats({ aktif: sA, total: sT, kosong: sK });
+  // 3. Fungsi Ambil Data Catatan
+  const fetchCatatan = async () => {
+    if (!tenant?.id) return;
+    setIsLoadingCatatan(true);
+    try {
+      // Sesuai update index.ts, kita taruh di method GET
+      const res = await fetch(`${API_URL}/api?action=get_catatan&tenant_id=${tenant.id}`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+         setCatatanList(data);
+      }
     } catch (e) {
-      console.error(e);
+      console.error("Gagal mengambil catatan harian", e);
     } finally {
-      setLoading(false);
+      setIsLoadingCatatan(false);
     }
   };
 
-  const exportMapelPDF = () => {
-    const { jsPDF } = (window as any).jspdf;
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text("Laporan Kehadiran Mapel", 14, 20);
-    doc.setFontSize(11);
-    doc.setTextColor(100);
-    doc.text(`Periode: ${startDate} s.d ${endDate}`, 14, 28);
-    
-    const rows = result.map((r, i) => [
-      (i + 1).toString(),
-      r.mapel,
-      r.total.toString(),
-      r.avg.toString(),
-      r.total > 0 ? "Aktif" : "Kosong"
-    ]);
+  // Ambil data catatan saat komponen dimuat atau tenant berubah
+  useEffect(() => {
+    fetchCatatan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant]);
 
-    doc.autoTable({
-      head: [["No", "Mata Pelajaran", "Total Sesi", "Rata-rata/Mg", "Status"]],
-      body: rows,
-      startY: 35,
-    });
-    doc.save(`Laporan_Mapel_${startDate}_${endDate}.pdf`);
+  // 4. Fungsi Simpan Catatan
+  const handleSimpanCatatan = async () => {
+    if (!pesan.trim() || !pengirim.trim()) {
+       return alert("Pesan dan Pengirim harus diisi!");
+    }
+    setIsSaving(true);
+    try {
+       const res = await fetch(`${API_URL}/api`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+             action: "save_catatan",
+             tenant_id: tenant?.id,
+             tgl: selectedDate,
+             pesan: pesan,
+             pengirim: pengirim
+          })
+       });
+       const data = await res.json();
+       if (data.status === 'success') {
+          setPesan('');
+          setPengirim('');
+          fetchCatatan(); // Refresh tabel catatan di bawah
+       } else {
+          alert("Gagal menyimpan catatan: " + (data.message || data.error));
+       }
+    } catch (e) {
+       console.error(e);
+       alert("Terjadi kesalahan koneksi saat menyimpan catatan.");
+    } finally {
+       setIsSaving(false);
+    }
   };
 
+  const formatTglIndo = (tglStr: string) => {
+    const d = new Date(tglStr);
+    if (isNaN(d.getTime())) return tglStr;
+    return d.toLocaleDateString('id-ID', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+  };
+
+  const rowHours = Array.from({ length: matrixData.maxJam }, (_, i) => i + 1);
+
   return (
-    <div className="fade-in print:hidden">
+    <div className="fade-in print:bg-white print:text-black">
+      
+      {/* ---------------- BAGIAN ATAS: TABEL MATRIKS HARI INI ---------------- */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-          <div>
-            <label className="block text-xs font-medium text-slate-500 mb-1">Dari Tanggal</label>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="block w-full px-3 py-2 text-sm border-slate-300 rounded-lg border bg-slate-50 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-500 mb-1">Sampai Tanggal</label>
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="block w-full px-3 py-2 text-sm border-slate-300 rounded-lg border bg-slate-50 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <button
-              onClick={filterGuru}
-              className="w-full px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center justify-center gap-2"
-            >
-              <i className="fa-solid fa-filter"></i> Tampilkan
-            </button>
-          </div>
-          <div className="flex justify-end">
-            <button
-              onClick={exportMapelPDF}
-              className="w-full sm:w-auto px-4 py-2 bg-rose-600 text-white text-sm font-medium rounded-lg hover:bg-rose-700 shadow-sm flex items-center justify-center gap-2"
-            >
-              <i className="fa-solid fa-file-pdf"></i> Export PDF
-            </button>
-          </div>
+        <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-6">
+            <div>
+               <h2 className="text-xl font-bold text-slate-800 flex items-center">
+                  <i className="fa-solid fa-table-cells mr-2 text-indigo-600"></i> Matriks Kelas Harian
+               </h2>
+               <p className="text-sm text-slate-500 mt-1">Pantau kekosongan dan aktivitas kelas per jam pelajaran.</p>
+            </div>
+            
+            <div className="flex items-center gap-3 bg-slate-50 p-2 rounded-lg border border-slate-200">
+               <label className="text-sm font-bold text-slate-600 uppercase tracking-wide px-2">Tanggal:</label>
+               <input
+                 type="date"
+                 value={selectedDate}
+                 onChange={(e) => setSelectedDate(e.target.value)}
+                 className="px-3 py-2 text-sm border border-slate-300 rounded-md bg-white focus:ring-2 focus:ring-indigo-500 outline-none font-medium text-slate-800"
+               />
+            </div>
+        </div>
+
+        <div className="overflow-x-auto rounded-xl border border-slate-300 shadow-sm">
+          <table className="min-w-full text-sm border-collapse bg-white font-sans">
+            <thead className="bg-slate-800 text-white">
+              <tr>
+                <th className="border border-slate-600 px-4 py-3 text-center w-16 uppercase text-xs font-black tracking-wider">Jam</th>
+                {classes.length === 0 ? (
+                   <th className="border border-slate-600 px-4 py-3 text-center uppercase text-xs">Kelas Belum Tersedia</th>
+                ) : (
+                   classes.map(cls => (
+                     <th key={cls} className="border border-slate-600 px-4 py-3 text-center uppercase text-xs font-black tracking-wider min-w-[120px]">
+                        {cls}
+                     </th>
+                   ))
+                )}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {classes.length === 0 ? (
+                 <tr>
+                    <td colSpan={2} className="p-8 text-center text-slate-400 italic">Pastikan terdapat data siswa/kelas yang aktif.</td>
+                 </tr>
+              ) : (
+                 rowHours.map(jam => (
+                   <tr key={jam} className="hover:bg-slate-50 transition-colors">
+                     <td className="border border-slate-300 px-2 py-3 text-center font-bold bg-slate-100 text-slate-800">
+                       {jam}
+                     </td>
+                     {classes.map(cls => {
+                       const mapel = matrixData.matrix[jam]?.[cls];
+                       return (
+                         <td key={cls} className="border border-slate-300 px-2 py-3 text-center">
+                            {mapel ? (
+                               <span className="font-semibold text-indigo-700 text-xs leading-tight block">{mapel}</span>
+                            ) : (
+                               <span className="text-slate-300">-</span>
+                            )}
+                         </td>
+                       );
+                     })}
+                   </tr>
+                 ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {loading && (
-        <div className="py-10 flex justify-center">
-          <div className="loader"></div>
-        </div>
-      )}
+      {/* ---------------- BAGIAN TENGAH: FORM INPUT PESAN/CATATAN ---------------- */}
+      <div className="bg-gradient-to-br from-indigo-50 to-white p-6 rounded-xl border border-indigo-100 shadow-sm mb-6 print:hidden">
+         <h3 className="font-bold text-lg text-indigo-900 mb-4 flex items-center">
+             <i className="fa-solid fa-pen-to-square mr-2"></i> Tambah Catatan Piket / Harian
+         </h3>
+         
+         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start">
+            <div className="md:col-span-1">
+               <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Pengirim / Oleh</label>
+               <input
+                 type="text"
+                 value={pengirim}
+                 onChange={(e) => setPengirim(e.target.value)}
+                 placeholder="Cth: Bpk. Budi / Piket"
+                 className="block w-full px-3 py-2.5 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-shadow"
+               />
+            </div>
+            
+            <div className="md:col-span-2">
+               <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Isi Pesan / Catatan</label>
+               <textarea
+                 value={pesan}
+                 onChange={(e) => setPesan(e.target.value)}
+                 placeholder="Tuliskan catatan kejadian, tugas, sakit, atau izin hari ini..."
+                 rows={2}
+                 className="block w-full px-3 py-2.5 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 outline-none resize-none transition-shadow"
+               />
+            </div>
 
-      {!loading && result.length > 0 && (
-        <div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                <p className="text-sm text-slate-500 font-medium">Mapel Aktif</p>
-                <h3 className="text-2xl font-bold text-slate-800 mt-1">{stats.aktif}</h3>
-              </div>
-              <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center">
-                <i className="fa-solid fa-book-open"></i>
-              </div>
+            <div className="md:col-span-1 pt-6">
+               <button
+                 onClick={handleSimpanCatatan}
+                 disabled={isSaving}
+                 className="w-full px-4 py-2.5 bg-indigo-600 text-white text-sm font-bold rounded-lg hover:bg-indigo-700 shadow-md flex items-center justify-center gap-2 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+               >
+                 {isSaving ? (
+                    <i className="fa-solid fa-spinner fa-spin"></i>
+                 ) : (
+                    <i className="fa-solid fa-paper-plane"></i>
+                 )}
+                 {isSaving ? "Menyimpan..." : "Simpan Pesan"}
+               </button>
             </div>
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                <p className="text-sm text-slate-500 font-medium">Total Pertemuan</p>
-                <h3 className="text-2xl font-bold text-slate-800 mt-1">{stats.total}</h3>
-              </div>
-              <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center">
-                <i className="fa-solid fa-handshake"></i>
-              </div>
-            </div>
-            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
-              <div>
-                <p className="text-sm text-slate-500 font-medium">Mapel Belum Isi</p>
-                <h3 className="text-2xl font-bold text-rose-600 mt-1">{stats.kosong}</h3>
-              </div>
-              <div className="w-10 h-10 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center">
-                <i className="fa-solid fa-circle-exclamation"></i>
-              </div>
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="font-semibold text-slate-800">Rekapitulasi Kehadiran Mapel</h3>
-              <span className="text-xs font-medium px-2 py-1 bg-indigo-50 text-indigo-700 rounded border border-indigo-100">
-                Periode: {periodLabel}
-              </span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider font-semibold border-b border-slate-200">
-                  <tr>
-                    <th className="px-6 py-4 w-10">No</th>
-                    <th className="px-6 py-4">Mata Pelajaran</th>
-                    <th className="px-6 py-4 text-center">Total Pertemuan</th>
-                    <th className="px-6 py-4 text-center">Rata-rata / Minggu</th>
-                    <th className="px-6 py-4 text-center">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {result.map((r, i) => (
-                    <tr key={i} className={r.total === 0 ? "bg-rose-50/50" : "hover:bg-slate-50"}>
-                      <td className="px-6 py-4 text-slate-500 font-medium">{i + 1}</td>
-                      <td className="px-6 py-4 font-semibold text-slate-700">{r.mapel}</td>
-                      <td className="px-6 py-4 text-center">
-                        <b>{r.total}</b> <span className="text-xs text-slate-400">Sesi</span>
-                      </td>
-                      <td className="px-6 py-4 text-center text-slate-600">{r.avg}</td>
-                      <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${r.total > 0 ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
-                          {r.total > 0 ? "Aktif" : "Kosong"}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+         </div>
+      </div>
+
+      {/* ---------------- BAGIAN BAWAH: TABEL RIWAYAT CATATAN ---------------- */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+           <h3 className="font-bold text-slate-800">
+              <i className="fa-solid fa-clock-rotate-left mr-2 text-slate-500"></i> Riwayat Catatan
+           </h3>
+           <button onClick={fetchCatatan} className="text-sm text-indigo-600 font-semibold hover:text-indigo-800 print:hidden">
+              <i className="fa-solid fa-rotate-right"></i> Refresh
+           </button>
         </div>
-      )}
+        
+        <div className="overflow-x-auto">
+           <table className="min-w-full text-left text-sm font-sans">
+              <thead className="bg-slate-100 text-slate-600 uppercase text-xs tracking-wider border-b border-slate-200">
+                 <tr>
+                    <th className="px-6 py-3 w-48 font-black">Tanggal</th>
+                    <th className="px-6 py-3 font-black">Isi Pesan</th>
+                 </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                 {isLoadingCatatan ? (
+                    <tr>
+                       <td colSpan={2} className="px-6 py-8 text-center text-slate-500">
+                          <i className="fa-solid fa-spinner fa-spin mr-2"></i> Memuat riwayat...
+                       </td>
+                    </tr>
+                 ) : catatanList.length === 0 ? (
+                    <tr>
+                       <td colSpan={2} className="px-6 py-8 text-center text-slate-400 italic">
+                          Belum ada riwayat catatan harian.
+                       </td>
+                    </tr>
+                 ) : (
+                    catatanList.map((cat, idx) => (
+                       <tr key={cat.id || idx} className="hover:bg-amber-50/50 transition-colors">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                             <div className="font-bold text-slate-700">{formatTglIndo(cat.tgl)}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                             <span className="text-slate-800 leading-relaxed text-sm">{cat.pesan}</span>
+                             <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-700">
+                                - {cat.pengirim}
+                             </span>
+                          </td>
+                       </tr>
+                    ))
+                 )}
+              </tbody>
+           </table>
+        </div>
+      </div>
+
     </div>
   );
 }
