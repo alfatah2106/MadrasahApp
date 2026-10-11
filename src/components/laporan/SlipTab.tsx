@@ -1,14 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useAppContext, API_URL } from '../../context/AppContext';
 
 export default function SlipTab({ rawData }: { rawData: any }) {
+  const { tenant } = useAppContext();
   const [email, setEmail] = useState('');
-  const [namaGuru, setNamaGuru] = useState(''); // State baru untuk nama guru
+  const [namaGuru, setNamaGuru] = useState(''); // State untuk nama guru
   const [startDate, setStartDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
   const [endDate, setEndDate] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
   const [result, setResult] = useState<any[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [emailsList, setEmailsList] = useState<string[]>([]);
 
-  const tenantName = rawData?.tenant_name || rawData?.tenantName || "NAMA SEKOLAH / TENANT";
+  const tenantName = tenant?.name || rawData?.tenant_name || rawData?.tenantName || "NAMA SEKOLAH / TENANT";
+
+  // Muat daftar email guru dari rawData atau panggil API jika belum ada
+  useEffect(() => {
+    const fromRaw = [
+      ...(rawData?.emails_only || []),
+      ...(rawData?.absensi || []).map((a: any) => a.email_guru).filter(Boolean),
+    ].filter(Boolean);
+
+    if (fromRaw.length > 0) {
+      setEmailsList([...new Set(fromRaw)].sort());
+    } else {
+      const tId = tenant?.id || rawData?.tenant_id || localStorage.getItem("last_tenant_id");
+      if (tId) {
+        fetch(`${API_URL}/api?action=get_options&tenant_id=${tId}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data?.emails && Array.isArray(data.emails)) {
+              setEmailsList([...new Set(data.emails)].sort());
+            }
+          })
+          .catch(err => console.error("Gagal load daftar email guru:", err));
+      }
+    }
+  }, [rawData, tenant]);
+
+  const allEmails = [...new Set([
+    ...emailsList,
+    ...(rawData?.emails_only || []),
+    ...(rawData?.absensi || []).map((a: any) => a.email_guru).filter(Boolean)
+  ])].filter(Boolean).sort();
 
   const getMonday = (d: Date) => {
     const date = new Date(d);
@@ -19,124 +53,172 @@ export default function SlipTab({ rawData }: { rawData: any }) {
   };
 
   const formatDate = (dateString: string | Date) => {
+    if (typeof dateString === 'string' && dateString.includes('-')) {
+      const parts = dateString.split('T')[0].split('-').map(Number);
+      if (parts.length === 3) {
+        return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+      }
+    }
     return new Date(dateString).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
   };
 
   // Format tanggal khusus untuk nama file PDF (contoh: 01-08)
   const formatShortDateFile = (dateString: string | Date) => {
+    if (typeof dateString === 'string' && dateString.includes('-')) {
+      const parts = dateString.split('T')[0].split('-').map(Number);
+      if (parts.length === 3) {
+        const day = String(parts[2]).padStart(2, '0');
+        const month = String(parts[1]).padStart(2, '0');
+        return `${day}-${month}`;
+      }
+    }
     const d = new Date(dateString);
     const day = String(d.getDate()).padStart(2, '0');
     const month = String(d.getMonth() + 1).padStart(2, '0');
     return `${day}-${month}`; 
   };
 
-  const generateSlipGuru = () => {
-    const start = new Date(startDate);
-    start.setHours(0, 0, 0, 0);
-    
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
-    
-    if (!email) return alert("Pilih Email Guru terlebih dahulu!");
-
-    const filtered = rawData.absensi.filter((r: any) => {
-      const rowDate = new Date(r.tanggal);
-      return r.email_guru === email && rowDate >= start && rowDate <= end;
-    });
-
-    if (filtered.length === 0) {
-        setResult([]);
-        setHasSearched(true);
-        return alert("Tidak ada data mengajar pada periode tersebut.");
+  const generateSlipGuru = async () => {
+    if (!email) {
+      alert("Pilih Email Guru terlebih dahulu!");
+      return;
+    }
+    if (!startDate || !endDate) {
+      alert("Pilih periode tanggal terlebih dahulu!");
+      return;
+    }
+    if (new Date(startDate) > new Date(endDate)) {
+      alert("Tanggal mulai tidak boleh lebih besar dari tanggal akhir!");
+      return;
     }
 
-    const weeksMap = new Map();
+    const tenantId = tenant?.id || rawData?.tenant_id || localStorage.getItem("last_tenant_id");
+    if (!tenantId) {
+      alert("Tenant ID tidak ditemukan. Silakan login kembali di halaman utama.");
+      return;
+    }
 
-    filtered.forEach((row: any) => {
-      const dateObj = new Date(row.tanggal);
-      const dayOfWeek = dateObj.getDay(); 
-
-      if (dayOfWeek === 0) return; 
-
-      const monday = getMonday(dateObj);
-      const weekKey = monday.getTime();
-
-      if (!weeksMap.has(weekKey)) {
-        const saturday = new Date(monday);
-        saturday.setDate(monday.getDate() + 5);
-
-        weeksMap.set(weekKey, {
-          label: `${formatDate(monday)} s/d ${formatDate(saturday)}`,
-          monday: monday,
-          matrix: {}, 
-          dailyTotals: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
-          weeklyTotal: 0,
-          maxJam: 8 
-        });
-      }
-
-      const weekData = weeksMap.get(weekKey);
-      
-      if (!weekData.matrix[dayOfWeek]) {
-        weekData.matrix[dayOfWeek] = {};
-      }
-
-      if (row.jam) {
-        const jamArray = row.jam.toString().split(',')
-          .map((j: string) => parseInt(j.trim(), 10))
-          .filter((j: number) => !isNaN(j));
-        
-        jamArray.forEach((jam: number) => {
-          if (jam > weekData.maxJam) weekData.maxJam = jam;
-
-          if (!weekData.matrix[dayOfWeek][jam]) {
-            weekData.matrix[dayOfWeek][jam] = {
-              mapel: row.mapel,
-              kelas: row.kelas,
-              materi: row.materi
-            };
-            weekData.dailyTotals[dayOfWeek]++;
-            weekData.weeklyTotal++;
-          }
-        });
-      }
-    });
-
-    const sortedWeeks = Array.from(weeksMap.values()).sort((a, b) => a.monday.getTime() - b.monday.getTime());
-    setResult(sortedWeeks);
+    setIsLoading(true);
     setHasSearched(true);
+
+    try {
+      // Pastikan komponen mengirimkan nilai startDate dan endDate secara presisi sebagai query parameter
+      const params = new URLSearchParams({
+        action: 'get_slip',
+        tenant_id: tenantId,
+        startDate: startDate,
+        endDate: endDate,
+        email: email
+      });
+
+      const res = await fetch(`${API_URL}/api?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error(`Server merespons status ${res.status}`);
+      }
+
+      const fetchedData = await res.json();
+      if (!Array.isArray(fetchedData) || fetchedData.length === 0) {
+        setResult([]);
+        alert("Tidak ada data mengajar pada periode tersebut.");
+        return;
+      }
+
+      const weeksMap = new Map();
+
+      fetchedData.forEach((row: any) => {
+        // Normalisasi tanggal untuk mencegah pergeseran zona waktu
+        const cleanDate = typeof row.tanggal === 'string' ? row.tanggal.split('T')[0] : row.tanggal;
+        const [y, m, d] = cleanDate.split('-').map(Number);
+        const dateObj = new Date(y, m - 1, d);
+        const dayOfWeek = dateObj.getDay();
+
+        if (dayOfWeek === 0) return; // Skip hari Minggu
+
+        const monday = getMonday(dateObj);
+        const weekKey = monday.getTime();
+
+        if (!weeksMap.has(weekKey)) {
+          const saturday = new Date(monday);
+          saturday.setDate(monday.getDate() + 5);
+
+          weeksMap.set(weekKey, {
+            label: `${formatDate(monday)} s/d ${formatDate(saturday)}`,
+            monday: monday,
+            matrix: {},
+            dailyTotals: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
+            weeklyTotal: 0,
+            maxJam: 8
+          });
+        }
+
+        const weekData = weeksMap.get(weekKey);
+
+        if (!weekData.matrix[dayOfWeek]) {
+          weekData.matrix[dayOfWeek] = {};
+        }
+
+        if (row.jam) {
+          const jamArray = row.jam.toString().split(',')
+            .map((j: string) => parseInt(j.trim(), 10))
+            .filter((j: number) => !isNaN(j));
+
+          jamArray.forEach((jam: number) => {
+            if (jam > weekData.maxJam) weekData.maxJam = jam;
+
+            if (!weekData.matrix[dayOfWeek][jam]) {
+              weekData.matrix[dayOfWeek][jam] = {
+                mapel: row.mapel,
+                kelas: row.kelas,
+                materi: row.materi
+              };
+              weekData.dailyTotals[dayOfWeek]++;
+              weekData.weeklyTotal++;
+            }
+          });
+        }
+      });
+
+      const sortedWeeks = Array.from(weeksMap.values()).sort((a, b) => a.monday.getTime() - b.monday.getTime());
+      if (sortedWeeks.length === 0) {
+        setResult([]);
+        alert("Tidak ada data mengajar pada periode tersebut.");
+      } else {
+        setResult(sortedWeeks);
+      }
+    } catch (err: any) {
+      console.error("Gagal membuat slip guru:", err);
+      alert(`Terjadi kesalahan saat memuat data slip: ${err.message || 'Koneksi gagal'}`);
+      setResult([]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Fungsi untuk handle klik tombol Cetak agar nama file otomatis berubah
   const handlePrint = () => {
     const originalTitle = document.title; // Simpan judul web asli
-    
+
     // Siapkan nama file
     const safeName = namaGuru.trim() || email.split('@')[0] || "Guru";
     const tglMulai = formatShortDateFile(startDate);
     const tglAkhir = formatShortDateFile(endDate);
-    
+
     // Ubah title web sementara (Browser akan pakai ini untuk nama file PDF)
     document.title = `Rekap ${safeName} ${tglMulai} sd ${tglAkhir}`;
-    
+
     window.print();
-    
+
     // Kembalikan ke judul web aslinya
     document.title = originalTitle;
   };
 
-  const allEmails = [...new Set([
-      ...(rawData.absensi || []).map((a: any) => a.email_guru).filter(Boolean), 
-      ...(rawData.emails_only || [])
-  ])].sort();
-
   const daysLabel = [
-      { id: 1, name: "SENIN" },
-      { id: 2, name: "SELASA" },
-      { id: 3, name: "RABU" },
-      { id: 4, name: "KAMIS" },
-      { id: 5, name: "JUMAT" },
-      { id: 6, name: "SABTU" }
+    { id: 1, name: "SENIN" },
+    { id: 2, name: "SELASA" },
+    { id: 3, name: "RABU" },
+    { id: 4, name: "KAMIS" },
+    { id: 5, name: "JUMAT" },
+    { id: 6, name: "SABTU" }
   ];
 
   return (
@@ -185,15 +267,32 @@ export default function SlipTab({ rawData }: { rawData: any }) {
           <div className="md:col-span-2">
             <button
               onClick={generateSlipGuru}
-              className="w-full px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center justify-center gap-2 transition-colors"
+              disabled={isLoading}
+              className="w-full px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm flex items-center justify-center gap-2 transition-colors"
             >
-              <i className="fa-solid fa-file-invoice"></i> Buat Slip
+              {isLoading ? (
+                <>
+                  <i className="fa-solid fa-spinner fa-spin"></i> Memuat...
+                </>
+              ) : (
+                <>
+                  <i className="fa-solid fa-file-invoice"></i> Buat Slip
+                </>
+              )}
             </button>
           </div>
         </div>
       </div>
 
-      {!hasSearched && (
+      {isLoading && (
+        <div className="py-20 text-center print:hidden">
+          <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent mb-3"></div>
+          <p className="text-slate-600 font-medium">Sedang mengambil data rekap dari server...</p>
+          <p className="text-xs text-slate-400 mt-1">Rentang: {formatDate(startDate)} s/d {formatDate(endDate)}</p>
+        </div>
+      )}
+
+      {!isLoading && !hasSearched && (
         <div className="py-20 text-center print:hidden">
           <h3 className="text-lg font-medium text-slate-900">Belum ada slip</h3>
           <p className="text-slate-500">Pilih email, isi nama guru, dan tentukan periode untuk melihat rekapitulasi matriks.</p>

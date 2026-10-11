@@ -54,12 +54,17 @@ export default function Laporan() {
       dataOptions = await resOptions.json();
       absensiData = await resAbsensi.json();
 
-      const emails = [...new Set(absensiData.map(a => a.email_guru).filter(Boolean))];
+      const emails = [...new Set([
+        ...(dataOptions?.emails || []),
+        ...absensiData.map(a => a.email_guru).filter(Boolean)
+      ])];
       localStorage.setItem("cache_options_laporan", JSON.stringify(dataOptions));
       localStorage.setItem("cache_emails_laporan", JSON.stringify(emails));
 
       setRawData(prev => ({
         ...prev,
+        tenant_id: tenant?.id,
+        tenant_name: tenant?.name,
         mapel: dataOptions.mapel || [],
         ref_kelas: dataOptions.kelas || [],
         ref_ujian: dataOptions.ujian || [],
@@ -207,7 +212,7 @@ export default function Laporan() {
           </button>
         </div>
 
-        {activeTab === 'guru' && <GuruTab rawData={rawData} setRawData={setRawData} />}
+        {activeTab === 'guru' && <GuruTab rawData={rawData} />}
         {activeTab === 'siswa' && <SiswaTab rawData={rawData} loadSiswaData={loadSiswaData} />}
         {activeTab === 'slip' && <SlipTab rawData={rawData} />}
       </main>
