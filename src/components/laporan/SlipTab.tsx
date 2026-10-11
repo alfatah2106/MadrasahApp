@@ -299,6 +299,13 @@ export default function SlipTab({ rawData }: { rawData: any }) {
         </div>
       )}
 
+      {!isLoading && hasSearched && result.length === 0 && (
+        <div className="py-20 text-center print:hidden">
+          <h3 className="text-lg font-medium text-slate-900">Tidak ada data</h3>
+          <p className="text-slate-500">Tidak ditemukan riwayat mengajar untuk guru dan periode tanggal tersebut.</p>
+        </div>
+      )}
+
       {hasSearched && result.length > 0 && (
         <div>
           {/* Tombol Cetak yang memanggil handlePrint */}
